@@ -11,7 +11,10 @@ Telegram - Zoop game bot
   - Multi Accounts With Threads
   - Multi Proxies Support
 
-
+## How find token?
+  ```bash
+console.log(JSON.parse(sessionStorage.getItem('__telegram__initParams')).tgWebAppData);
+  ```
 ## Configuration
 
 - **token.txt:** Make sure `token.txt` contains data that matches the format expected by the script. Here are examples of file formats:
