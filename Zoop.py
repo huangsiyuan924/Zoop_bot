@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import aiohttp
+import random
 from datetime import datetime
 from colorama import Fore, Style, init
 from fake_useragent import UserAgent
@@ -9,9 +10,6 @@ from aiohttp_socks import ProxyConnector
 
 # 初始化 colorama
 init(autoreset=True)
-
-# 时区设置
-wib = "Asia/Jakarta"
 
 class ZoopBot:
     def __init__(self):
@@ -42,6 +40,8 @@ class ZoopBot:
         self.spin_delay_min = 2000  # 2 seconds
         self.spin_delay_max = 5000  # 5 seconds
         self.check_interval = 3600000  # 1 hour
+        self.daily_check_interval = 1800000  # 30 minutes
+        self.spin_check_interval = 300000  # 5 minutes
 
     def clear_terminal(self):
         os.system("cls" if os.name == "nt" else "clear")
@@ -65,14 +65,14 @@ class ZoopBot:
 
     def load_tokens(self):
         if not os.path.exists(self.token_path):
-            self.log(f"{Fore.RED}No token.txt found. Please create one.{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}No token found. Please create one.{Style.RESET_ALL}")
             return []
 
         with open(self.token_path, "r") as f:
             tokens = [line.strip() for line in f.readlines() if line.strip()]
 
         if not tokens:
-            self.log(f"{Fore.RED}token.txt.txt is empty. Please add tokens.{Style.RESET_ALL}")
+            self.log(f"{Fore.RED}token.txt is empty. Please add tokens.{Style.RESET_ALL}")
             return []
 
         self.log(f"{Fore.GREEN}Loaded {len(tokens)} tokens.{Style.RESET_ALL}")
@@ -90,6 +90,9 @@ class ZoopBot:
             self.log(f"{Fore.RED}proxies.txt is empty. Running without proxy.{Style.RESET_ALL}")
         else:
             self.log(f"{Fore.GREEN}Loaded {len(self.proxies)} proxies.{Style.RESET_ALL}")
+
+    def get_random_delay(self, min_delay, max_delay):
+        return random.randint(min_delay, max_delay) / 1000
 
     def get_next_proxy_for_account(self, email):
         if email not in self.account_proxies:
@@ -118,10 +121,10 @@ class ZoopBot:
                     data = await response.json()
                     token = data["data"]["access_token"]
                     info = data["data"]["information"]
-                    self.log(f"Access token.txt retrieved for user: {info['username']}")
+                    self.log(f"Access token retrieved for user: {info['username']}")
                     return token, info
             except Exception as e:
-                self.log(f"Error getting access token.txt: {e}")
+                self.log(f"Error getting access token: {e}")
                 raise
 
     async def check_daily_info(self, token, user_id, proxy=None):
@@ -133,12 +136,12 @@ class ZoopBot:
                 async with session.get(url) as response:
                     response.raise_for_status()
                     data = await response.json()
-                    return data["data"]["claimed"], data["data"]["dayClaim"]
+                    return data["data"]["claimed"], data["data"]["dayClaim"], data["data"]["dailyIndex"]
             except Exception as e:
                 self.log(f"Error checking daily info: {e}")
                 raise
 
-    async def claim_daily_task(self, token, user_id, proxy=None, index=1):
+    async def claim_daily_task(self, token, user_id, proxy=None, index=2):
         url = f"{self.task_endpoint}/rewardDaily/{user_id}"
         payload = {"index": index}
         connector = ProxyConnector.from_url(proxy) if proxy else None
@@ -158,18 +161,72 @@ class ZoopBot:
         payload = {"userId": user_id, "date": datetime.now().isoformat()}
         connector = ProxyConnector.from_url(proxy) if proxy else None
         headers = {**self.headers, "Authorization": f"Bearer {token}"}
-        async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
-            try:
-                await asyncio.sleep(self.spin_delay_min / 1000)  # Random delay
+        try:
+            delay = self.get_random_delay(self.spin_delay_min, self.spin_delay_max)
+            self.log(f"Waiting for {delay} seconds before spinning...")
+            await asyncio.sleep(delay)
+
+            async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
                 async with session.post(self.spin_endpoint, json=payload) as response:
                     response.raise_for_status()
                     data = await response.json()
                     reward = data["data"]["circle"]["name"]
                     self.log(f"Spin completed! Reward: {reward}")
                     return data
-            except Exception as e:
-                self.log(f"Error performing spin: {e}")
-                raise
+        except Exception as e:
+            self.log(f"Error performing spin: {e}")
+            raise
+
+    async def check_and_claim_daily(self, token, user_id, proxy=None):
+        try:
+            daily_claimed, day_claim, daily_index = await self.check_daily_info(token, user_id, proxy)
+            today_date = datetime.now().strftime("%Y-%m-%d")
+
+            if daily_claimed:
+                self.log(f"Daily task already claimed for today ({today_date})")
+                return daily_claimed, day_claim, daily_index
+
+            if day_claim == today_date:
+                if daily_index is None:
+                    self.log("Warning: dailyIndex not found in API response. Using default value 1.")
+                    daily_index = 1
+
+                self.log(f"Found dailyIndex {daily_index} from API response. Using this for daily claim.")
+                await self.claim_daily_task(token, user_id, proxy, daily_index)
+
+                updated_daily_claimed, updated_day_claim, updated_daily_index = await self.check_daily_info(token, user_id, proxy)
+                if updated_daily_claimed:
+                    self.log(f"Daily claim successful for day {daily_index}!")
+                else:
+                    self.log("Daily claim attempt failed. Will retry on next check.")
+
+                return updated_daily_claimed, updated_day_claim, updated_daily_index
+            else:
+                self.log(f"Daily task not yet available for today ({today_date}). Current date in system: {day_claim}")
+                return daily_claimed, day_claim, daily_index
+        except Exception as e:
+            self.log(f"Error in daily claim process: {e}")
+            raise
+
+    async def use_all_spins(self, token, user_id, proxy=None, spin_count=0):
+        try:
+            self.log(f"Starting to use all available {spin_count} spins...")
+            remaining_spins = spin_count
+
+            while remaining_spins > 0:
+                await self.perform_spin(token, user_id, proxy)
+                remaining_spins -= 1
+                self.log(f"Spin completed. Remaining spins: {remaining_spins}")
+
+            self.log("All spins have been used successfully!")
+            return True
+        except Exception as e:
+            self.log(f"Error using all spins: {e}")
+            raise
+
+    async def check_spin_count(self, query_id, proxy=None):
+        token, info = await self.get_access_token_and_info(query_id, proxy)
+        return info["spin"]
 
     async def run_bot_for_user(self, query_id):
         user_id = self.parse_user_id_from_query(query_id)
@@ -183,24 +240,19 @@ class ZoopBot:
                 token, info = await self.get_access_token_and_info(query_id, proxy)
                 spin_count = info["spin"]
 
-                daily_claimed, day_claim = await self.check_daily_info(token, user_id, proxy)
-                if not daily_claimed:
-                    await self.claim_daily_task(token, user_id, proxy)
-                    token, info = await self.get_access_token_and_info(query_id, proxy)
-                    spin_count = info["spin"]
-                else:
-                    self.log("Daily task already claimed today.")
+                daily_claimed, day_claim, daily_index = await self.check_and_claim_daily(token, user_id, proxy)
+                spin_count = await self.check_spin_count(query_id, proxy)
+                self.log(f"Initial spin count: {spin_count}")
 
                 if spin_count > 0:
-                    await self.perform_spin(token, user_id, proxy)
-                    spin_count -= 1
-                    self.log(f"Remaining spins: {spin_count}")
+                    await self.use_all_spins(token, user_id, proxy, spin_count)
+                    spin_count = await self.check_spin_count(query_id, proxy)
+                    self.log(f"After using spins, current spin count: {spin_count}")
                 else:
                     self.log("No spin tickets available. Waiting for next check...")
-                    await asyncio.sleep(self.check_interval / 1000)
-                    token, info = await self.get_access_token_and_info(query_id, proxy)
-                    spin_count = info["spin"]
+                    await asyncio.sleep(self.spin_check_interval / 1000)
 
+                await asyncio.sleep(self.check_interval / 1000)
             except Exception as e:
                 self.log(f"Bot encountered an error: {e}")
                 await asyncio.sleep(self.retry_delay / 1000)
