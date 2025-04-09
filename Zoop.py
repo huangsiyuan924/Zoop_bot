@@ -119,9 +119,14 @@ class ZoopBot:
                 async with session.post(self.auth_endpoint, json=payload) as response:
                     response.raise_for_status()
                     data = await response.json()
+                    # print(data)
                     token = data["data"]["access_token"]
                     info = data["data"]["information"]
-                    self.log(f"Access token retrieved for user: {info['username']}")
+                    if 'username' in info.keys():
+                        username = info['username']
+                    else:
+                        username = info['userId']
+                    self.log(f"Access token retrieved for user: {username}")
                     return token, info
             except Exception as e:
                 self.log(f"Error getting access token: {e}")
